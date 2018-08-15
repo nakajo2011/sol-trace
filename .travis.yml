@@ -8,3 +8,11 @@ script:
     - npm run lint
     - npm run test
     - npm run build
+
+after_success:
+    - git config --replace-all remote.origin.fetch +refs/heads/*:refs/remotes/origin/*
+    - git config core.filemode false
+    - git fetch
+    - git checkout -b test origin/test
+    - git merge origin/master
+    - git push git@github.com:nakajo2011/sol_trace.git test
