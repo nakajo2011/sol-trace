@@ -205,7 +205,21 @@ var Web3TraceProvider = function () {
   }, {
     key: 'getContractCode',
     value: function getContractCode(address) {
-      return this.web3.eth.getCode(address);
+      var _this2 = this;
+
+      return new _promise2.default(function (resolve, reject) {
+        _this2.nextProvider.sendAsync({
+          id: new Date().getTime(),
+          method: 'eth_getCode',
+          params: [address]
+        }, function (err, result) {
+          if (err) {
+            reject(err);
+          } else {
+            resolve(result.result);
+          }
+        });
+      });
     }
 
     /**
@@ -219,12 +233,12 @@ var Web3TraceProvider = function () {
   }, {
     key: 'getTransactionTrace',
     value: function getTransactionTrace(nextId, txHash) {
-      var _this2 = this;
+      var _this3 = this;
 
       var traceParams = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
 
       return new _promise2.default(function (resolve, reject) {
-        _this2.nextProvider.sendAsync({
+        _this3.nextProvider.sendAsync({
           id: nextId,
           method: 'debug_traceTransaction',
           params: [txHash, traceParams]
@@ -500,6 +514,11 @@ var Web3TraceProvider = function () {
       var sources = [];
       artifactFileNames.forEach(function (artifactFileName) {
         var artifact = JSON.parse(_fs2.default.readFileSync(artifactFileName).toString());
+
+        // If the sourcePath starts with zeppelin, then prepend with the pwd and node_modules
+        if (new RegExp('^(open)?zeppelin-solidity').test(artifact.sourcePath)) {
+          artifact.sourcePath = process.env.PWD + '/node_modules/' + artifact.sourcePath;
+        }
         sources.push({
           artifactFileName: artifactFileName,
           id: artifact.ast.id,
@@ -539,15 +558,15 @@ var Web3TraceProvider = function () {
   }, {
     key: 'getContractDataIfExists',
     value: function getContractDataIfExists(contractsData, bytecode) {
-      var _this3 = this;
+      var _this4 = this;
 
       if (!bytecode.startsWith('0x')) {
         throw new Error('0x hex prefix missing: ' + bytecode);
       }
 
       var contractData = contractsData.find(function (contractDataCandidate) {
-        var bytecodeRegex = _this3.bytecodeToBytecodeRegex(contractDataCandidate.bytecode);
-        var runtimeBytecodeRegex = _this3.bytecodeToBytecodeRegex(contractDataCandidate.runtimeBytecode);
+        var bytecodeRegex = _this4.bytecodeToBytecodeRegex(contractDataCandidate.bytecode);
+        var runtimeBytecodeRegex = _this4.bytecodeToBytecodeRegex(contractDataCandidate.runtimeBytecode);
         if (contractDataCandidate.bytecode.length === 2 || contractDataCandidate.runtimeBytecode.length === 2) {
           return false;
         }
