@@ -515,9 +515,10 @@ var Web3TraceProvider = function () {
       artifactFileNames.forEach(function (artifactFileName) {
         var artifact = JSON.parse(_fs2.default.readFileSync(artifactFileName).toString());
 
+        var correctPath = process.env.MODULE_RELATIVE_PATH || '';
         // If the sourcePath starts with zeppelin, then prepend with the pwd and node_modules
         if (new RegExp('^(open)?zeppelin-solidity').test(artifact.sourcePath)) {
-          artifact.sourcePath = process.env.PWD + '/node_modules/' + artifact.sourcePath;
+          artifact.sourcePath = process.env.PWD + '/' + correctPath + 'node_modules/' + artifact.sourcePath;
         }
         sources.push({
           artifactFileName: artifactFileName,
