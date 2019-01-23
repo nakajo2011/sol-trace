@@ -68,8 +68,21 @@ function isEndOpcode(op) {
   return [OpCode.Return, OpCode.Stop, OpCode.Revert, OpCode.Invalid, OpCode.SelfDestruct].indexOf(op) >= 0;
 }
 
+/**
+ * convert stack data to address data format.
+ * almost stack data is 32byte, so remove 0 that be filled.
+ *
+ * @param stackEntry
+ * @return address
+ */
 function getAddressFromStackEntry(stackEntry) {
-  return stackEntry;
+  if (stackEntry.startsWith('0x')) {
+    stackEntry = stackEntry.slice(2);
+  }
+  if (stackEntry.length > 40) {
+    stackEntry = stackEntry.slice(stackEntry.length - 40);
+  }
+  return '0x' + stackEntry;
 }
 
 var isPush = function isPush(inst) {

@@ -28,25 +28,27 @@ var _createClass2 = require('babel-runtime/helpers/createClass');
 
 var _createClass3 = _interopRequireDefault(_createClass2);
 
-var _glob = require('glob');
-
-var _glob2 = _interopRequireDefault(_glob);
-
-var _fs = require('fs');
-
-var _fs2 = _interopRequireDefault(_fs);
-
 var _ethereumjsUtil = require('ethereumjs-util');
 
 var _ethereumjsUtil2 = _interopRequireDefault(_ethereumjsUtil);
+
+var _abiDecodeFunctions = require('abi-decode-functions');
+
+var _abiDecodeFunctions2 = _interopRequireDefault(_abiDecodeFunctions);
 
 var _trace = require('./trace');
 
 var _sourceMaps = require('./source-maps');
 
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+var _assembler_info_provider = require('./assembler_info_provider');
 
-var REVERT_MESSAGE_ID = '0x08c379a0'; // first 4byte of keccak256('Error(string)').
+var _assembler_info_provider2 = _interopRequireDefault(_assembler_info_provider);
+
+var _error_response_capture = require('./error_response_capture');
+
+var _error_response_capture2 = _interopRequireDefault(_error_response_capture);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 var Web3TraceProvider = function () {
   function Web3TraceProvider(web3) {
@@ -54,6 +56,8 @@ var Web3TraceProvider = function () {
 
     this.web3 = web3;
     this.nextProvider = web3.currentProvider;
+    this.assemblerInfoProvider = new _assembler_info_provider2.default();
+    this.contractCodes = {};
   }
 
   /**
@@ -67,43 +71,44 @@ var Web3TraceProvider = function () {
 
   (0, _createClass3.default)(Web3TraceProvider, [{
     key: 'send',
-    value: function send() {
-      var payload = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+    value: function send(payload) {
+      var cb = arguments.length > 1 && arguments[1] !== undefined ? arguments[1] : function () {};
 
-      return this.nextProvider.send(payload);
+      return this.nextProvider.send(payload, cb);
     }
   }, {
     key: 'sendAsync',
     value: function sendAsync(payload, cb) {
       var _this = this;
 
-      if (payload.method === 'eth_sendTransaction' || payload.method === 'eth_call' || payload.method === 'eth_getTransactionReceipt') {
+      var errorResCap = new _error_response_capture2.default(payload);
+      if (errorResCap.isTargetMethod()) {
         var txData = payload.params[0];
-        return this.nextProvider.sendAsync(payload, function (err, result) {
-          if (_this._isGanacheErrorResponse(result)) {
+        return this.nextProvider[this.nextProvider.sendAsync ? 'sendAsync' : 'send'](payload, function (err, result) {
+          errorResCap.parseResponse(result);
+          if (errorResCap.isGanacheError) {
             var txHash = result.result || (0, _keys2.default)(result.error.data)[0];
             if (_ethereumjsUtil2.default.toBuffer(txHash).length === 32) {
               var toAddress = txData.to;
               // record tx trace
-              _this.recordTxTrace(toAddress, txHash, result, _this._isInvalidOpcode(result)).then(function (traceResult) {
+              _this.recordTxTrace(toAddress, txHash, result, _this.getFunctionId(payload), errorResCap.isInvaliding).then(function (traceResult) {
                 result.error.message += traceResult;
                 cb(err, result);
               }).catch(function (traceError) {
                 cb(traceError, result);
               });
             } else {
-              console.warn('Could not trace REVERT / invalid opcode. maybe legacy node.');
-              cb(err, result);
+              cb(new Error('Could not trace REVERT / invalid opcode. maybe legacy node.'), result);
             }
-          } else if (_this._isGethEthCallRevertResponse(payload.method, result)) {
+          } else if (errorResCap.isGethError && errorResCap.isEthCallMethod()) {
             var messageBuf = _this.pickUpRevertReason(_ethereumjsUtil2.default.toBuffer(result.result));
             console.warn('VM Exception while processing transaction: revert. reason: ' + messageBuf.toString());
             cb(err, result);
-          } else if (_this._isGethErrorReceiptResponse(payload.method, result)) {
+          } else if (errorResCap.isGethError && errorResCap.isGetTransactionReceipt()) {
             // record tx trace
             var _toAddress = result.result.to;
             var _txHash = result.result.transactionHash;
-            _this.recordTxTrace(_toAddress, _txHash, result).then(function (traceResult) {
+            _this.recordTxTrace(_toAddress, _txHash, result, _this.getFunctionId(payload)).then(function (traceResult) {
               console.warn(traceResult);
               cb(err, result);
             }).catch(function (traceError) {
@@ -115,57 +120,7 @@ var Web3TraceProvider = function () {
         });
       }
 
-      return this.nextProvider.sendAsync(payload, cb);
-    }
-
-    /**
-     * Check the response result is ganache-core response and has revert error.
-     * @param  result Response data.
-     * @return boolean
-     */
-
-  }, {
-    key: '_isGanacheErrorResponse',
-    value: function _isGanacheErrorResponse(result) {
-      return result.error && result.error.message && (result.error.message.endsWith(': revert') || result.error.message.endsWith(': invalid opcode'));
-    }
-
-    /**
-     * Check is invalid opcode error.
-     * @param  result Response data.
-     * @return boolean
-     */
-
-  }, {
-    key: '_isInvalidOpcode',
-    value: function _isInvalidOpcode(result) {
-      return result.error.message.endsWith(': invalid opcode');
-    }
-
-    /**
-     * Check the response result is go-ethereum response and has revert reason.
-     * @param  method Request JSON-RPC method
-     * @param  result Response data.
-     * @return boolean
-     */
-
-  }, {
-    key: '_isGethEthCallRevertResponse',
-    value: function _isGethEthCallRevertResponse(method, result) {
-      return method === 'eth_call' && result.result && result.result.startsWith(REVERT_MESSAGE_ID);
-    }
-
-    /**
-     * Check the response result is go-ethereum transaction receipt response and it mark error.
-     * @param  method Request JSON-RPC method
-     * @param  result Response data.
-     * @return boolean
-     */
-
-  }, {
-    key: '_isGethErrorReceiptResponse',
-    value: function _isGethErrorReceiptResponse(method, result) {
-      return method === 'eth_getTransactionReceipt' && result.result && result.result.status === '0x0';
+      return this.nextProvider[this.nextProvider.sendAsync ? 'sendAsync' : 'send'](payload, cb);
     }
 
     /**
@@ -208,7 +163,12 @@ var Web3TraceProvider = function () {
       var _this2 = this;
 
       return new _promise2.default(function (resolve, reject) {
-        _this2.nextProvider.sendAsync({
+        if (address === _trace.constants.NEW_CONTRACT) {
+          return reject(new Error('Contract Creation is not supporte.'));
+        } else if (_this2.contractCodes[address]) {
+          return resolve(_this2.contractCodes[address]);
+        }
+        _this2.nextProvider[_this2.nextProvider.sendAsync ? 'sendAsync' : 'send']({
           id: new Date().getTime(),
           method: 'eth_getCode',
           params: [address]
@@ -216,7 +176,8 @@ var Web3TraceProvider = function () {
           if (err) {
             reject(err);
           } else {
-            resolve(result.result);
+            _this2.contractCodes[address] = result.result;
+            resolve(_this2.contractCodes[address]);
           }
         });
       });
@@ -238,7 +199,7 @@ var Web3TraceProvider = function () {
       var traceParams = arguments.length > 2 && arguments[2] !== undefined ? arguments[2] : {};
 
       return new _promise2.default(function (resolve, reject) {
-        _this3.nextProvider.sendAsync({
+        _this3.nextProvider[_this3.nextProvider.sendAsync ? 'sendAsync' : 'send']({
           id: nextId,
           method: 'debug_traceTransaction',
           params: [txHash, traceParams]
@@ -252,11 +213,28 @@ var Web3TraceProvider = function () {
       });
     }
   }, {
+    key: 'extractEvmCallStack',
+    value: function extractEvmCallStack(trace, address) {
+      var logs = trace === undefined || trace.structLogs === undefined ? [] : trace.structLogs;
+      return (0, _trace.getRevertTrace)(logs, address);
+    }
+
+    /**
+     * recording trace that start point, call and revert opcode point from debug trace.
+     * @param address
+     * @param txHash
+     * @param result
+     * @param functionId
+     * @param isInvalid
+     * @return {Promise<*>}
+     */
+
+  }, {
     key: 'recordTxTrace',
     value: function () {
-      var _ref = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee(address, txHash, result) {
-        var isInvalid = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : false;
-        var trace, logs, evmCallStack;
+      var _ref = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee(address, txHash, result, functionId) {
+        var isInvalid = arguments.length > 4 && arguments[4] !== undefined ? arguments[4] : false;
+        var trace, evmCallStack, opcodes, decoder, startPointStack;
         return _regenerator2.default.wrap(function _callee$(_context) {
           while (1) {
             switch (_context.prev = _context.next) {
@@ -271,20 +249,34 @@ var Web3TraceProvider = function () {
 
               case 3:
                 trace = _context.sent;
-                logs = trace === undefined ? [] : trace.structLogs;
-                evmCallStack = (0, _trace.getRevertTrace)(logs, address);
+                evmCallStack = this.extractEvmCallStack(trace, address);
+                _context.next = 7;
+                return this.getContractCode(address);
 
-                if (!(evmCallStack.length > 0)) {
-                  _context.next = 10;
-                  break;
+              case 7:
+                opcodes = _context.sent;
+                decoder = new _abiDecodeFunctions2.default(opcodes);
+                // create function call point stack
+
+                startPointStack = {
+                  address: address,
+                  structLog: {
+                    pc: decoder.findProgramCounter(functionId),
+                    type: 'call start point'
+                  }
+                };
+
+                evmCallStack.unshift(startPointStack);
+                if (evmCallStack.length === 1) {
+                  // if length === 1, it did not get debug_traceTransaction, because it error happens in eth_call.
+                  // so that, we create callStack from RPC response that is program counter of REVERT / invalid.
+                  evmCallStack.push(this.createCallStackFromResponse(address, txHash, result, isInvalid));
                 }
-
+                // if getRevertTrace returns a call stack it means there was a
+                // revert.
                 return _context.abrupt('return', this.getStackTrace(evmCallStack));
 
-              case 10:
-                return _context.abrupt('return', this.getStackTranceSimple(address, txHash, result, isInvalid));
-
-              case 11:
+              case 13:
               case 'end':
                 return _context.stop();
             }
@@ -292,194 +284,172 @@ var Web3TraceProvider = function () {
         }, _callee, this);
       }));
 
-      function recordTxTrace(_x4, _x5, _x6) {
+      function recordTxTrace(_x4, _x5, _x6, _x7) {
         return _ref.apply(this, arguments);
       }
 
       return recordTxTrace;
     }()
+
+    /**
+     * trace info convert to stack trace info that is using assembly opcodes.
+     * @param address
+     * @param txHash
+     * @param result
+     * @param isInvalid
+     * @return {Promise<*>}
+     */
+
   }, {
-    key: 'getStackTranceSimple',
-    value: function () {
-      var _ref2 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee2(address, txHash, result) {
-        var isInvalid = arguments.length > 3 && arguments[3] !== undefined ? arguments[3] : false;
-        var bytecode, contractData, bytecodeHex, sourceMap, pcToSourceRange, sourceRange, pc, errorType, traceArray;
-        return _regenerator2.default.wrap(function _callee2$(_context2) {
-          while (1) {
-            switch (_context2.prev = _context2.next) {
-              case 0:
-                if (!this._contractsData) {
-                  this._contractsData = this.collectContractsData();
-                }
-                _context2.next = 3;
-                return this.getContractCode(address);
-
-              case 3:
-                bytecode = _context2.sent;
-                contractData = this.getContractDataIfExists(this._contractsData.contractsData, bytecode);
-
-                if (contractData) {
-                  _context2.next = 9;
-                  break;
-                }
-
-                console.warn('unknown contract address: ' + address + '.');
-                console.warn('Maybe you try to \'rm build/contracts/* && truffle compile\' for reset sourceMap.');
-                return _context2.abrupt('return', null);
-
-              case 9:
-                bytecodeHex = _ethereumjsUtil2.default.stripHexPrefix(bytecode);
-                sourceMap = contractData.sourceMapRuntime;
-                pcToSourceRange = (0, _sourceMaps.parseSourceMap)(this._contractsData.sourceCodes, sourceMap, bytecodeHex, this._contractsData.sources);
-                sourceRange = void 0;
-                pc = result.error.data[txHash].program_counter;
-                // Sometimes there is not a mapping for this pc (e.g. if the revert
-                // actually happens in assembly).
-
-              case 14:
-                if (sourceRange) {
-                  _context2.next = 22;
-                  break;
-                }
-
-                sourceRange = pcToSourceRange[pc];
-                pc -= 1;
-
-                if (!(pc <= 0)) {
-                  _context2.next = 20;
-                  break;
-                }
-
-                console.warn('could not find matching sourceRange for structLog: ' + result.error.data);
-                return _context2.abrupt('return', null);
-
-              case 20:
-                _context2.next = 14;
-                break;
-
-              case 22:
-                errorType = isInvalid ? 'invalid opcode' : 'REVERT';
-
-                if (!sourceRange) {
-                  _context2.next = 26;
-                  break;
-                }
-
-                traceArray = [sourceRange.fileName, sourceRange.location.start.line, sourceRange.location.start.column].join(':');
-                return _context2.abrupt('return', '\n\nStack trace for ' + errorType + ':\n' + traceArray + '\n');
-
-              case 26:
-                return _context2.abrupt('return', '\n\nCould not determine stack trace for ' + errorType + '\n');
-
-              case 27:
-              case 'end':
-                return _context2.stop();
-            }
+    key: 'createCallStackFromResponse',
+    value: function createCallStackFromResponse(address, txHash, result, isInvalid) {
+      var pc = -1;
+      if (result.error && result.error.data) {
+        pc = result.error.data[txHash].program_counter;
+        var errorStack = {
+          address: address,
+          structLog: {
+            pc: pc,
+            type: 'call ' + (isInvalid ? 'invalid' : 'revert') + ' point'
           }
-        }, _callee2, this);
-      }));
-
-      function getStackTranceSimple(_x8, _x9, _x10) {
-        return _ref2.apply(this, arguments);
+        };
+        return errorStack;
+      } else {
+        throw new Error('not supported data formart.');
       }
+    }
 
-      return getStackTranceSimple;
-    }()
+    /**
+     * trace info convert to stack trace info that is using call stack.
+     * @param evmCallStack
+     * @param functionId
+     * @return {Promise<string>}
+     */
+
   }, {
     key: 'getStackTrace',
     value: function () {
-      var _ref3 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee3(evmCallStack) {
-        var sourceRanges, index, evmCallStackEntry, isContractCreation, bytecode, contractData, errMsg, bytecodeHex, sourceMap, pcToSourceRange, sourceRange, pc, traceArray;
-        return _regenerator2.default.wrap(function _callee3$(_context3) {
+      var _ref2 = (0, _asyncToGenerator3.default)( /*#__PURE__*/_regenerator2.default.mark(function _callee2(evmCallStack, functionId) {
+        var _this4 = this;
+
+        var sourceRanges, _loop, index, _ret, traceArray;
+
+        return _regenerator2.default.wrap(function _callee2$(_context3) {
           while (1) {
             switch (_context3.prev = _context3.next) {
               case 0:
                 sourceRanges = [];
+                _loop = /*#__PURE__*/_regenerator2.default.mark(function _loop(index) {
+                  var evmCallStackEntry, isContractCreation, bytecode, contractData, errMsg, bytecodeHex, sourceMap, pcToSourceRange, sourceRange, pc, msgParams;
+                  return _regenerator2.default.wrap(function _loop$(_context2) {
+                    while (1) {
+                      switch (_context2.prev = _context2.next) {
+                        case 0:
+                          evmCallStackEntry = evmCallStack[index];
+                          isContractCreation = evmCallStackEntry.address === _trace.constants.NEW_CONTRACT;
 
-                if (!this._contractsData) {
-                  this._contractsData = this.collectContractsData();
-                }
+                          if (!isContractCreation) {
+                            _context2.next = 5;
+                            break;
+                          }
 
+                          console.error('Contract creation not supported');
+                          return _context2.abrupt('return', 'continue');
+
+                        case 5:
+                          _context2.next = 7;
+                          return _this4.getContractCode(evmCallStackEntry.address);
+
+                        case 7:
+                          bytecode = _context2.sent;
+                          contractData = _this4.assemblerInfoProvider.getContractDataIfExists(bytecode);
+
+                          if (contractData) {
+                            _context2.next = 13;
+                            break;
+                          }
+
+                          errMsg = isContractCreation ? 'Unknown contract creation transaction' : 'Transaction to an unknown address: ' + evmCallStackEntry.address;
+
+                          console.warn(errMsg);
+                          return _context2.abrupt('return', 'continue');
+
+                        case 13:
+                          bytecodeHex = _ethereumjsUtil2.default.stripHexPrefix(bytecode);
+                          sourceMap = isContractCreation ? contractData.sourceMap : contractData.sourceMapRuntime;
+                          pcToSourceRange = (0, _sourceMaps.parseSourceMap)(_this4.assemblerInfoProvider.sourceCodes, sourceMap, bytecodeHex, _this4.assemblerInfoProvider.sources);
+                          sourceRange = void 0;
+                          pc = evmCallStackEntry.structLog.pc;
+                          // Sometimes there is not a mapping for this pc (e.g. if the revert
+                          // actually happens in assembly). In that case, we want to keep
+                          // searching backwards by decrementing the pc until we find a
+                          // mapped source range.
+
+                        case 18:
+                          if (sourceRange) {
+                            _context2.next = 27;
+                            break;
+                          }
+
+                          sourceRange = pcToSourceRange[pc];
+                          pc -= 1;
+
+                          if (!(pc <= 0)) {
+                            _context2.next = 25;
+                            break;
+                          }
+
+                          msgParams = ['pc', 'op', 'type'].map(function (key) {
+                            return key + ': ' + evmCallStackEntry.structLog[key];
+                          });
+
+                          console.warn('could not find matching sourceRange for structLog: ' + msgParams.join(', '));
+                          return _context2.abrupt('break', 27);
+
+                        case 25:
+                          _context2.next = 18;
+                          break;
+
+                        case 27:
+                          if (sourceRange) {
+                            sourceRanges.push(sourceRange);
+                          }
+
+                        case 28:
+                        case 'end':
+                          return _context2.stop();
+                      }
+                    }
+                  }, _loop, _this4);
+                });
                 index = 0;
 
               case 3:
                 if (!(index < evmCallStack.length)) {
-                  _context3.next = 34;
+                  _context3.next = 11;
                   break;
                 }
 
-                evmCallStackEntry = evmCallStack[index];
-                isContractCreation = evmCallStackEntry.address === _trace.constants.NEW_CONTRACT;
+                return _context3.delegateYield(_loop(index), 't0', 5);
 
-                if (!isContractCreation) {
-                  _context3.next = 9;
+              case 5:
+                _ret = _context3.t0;
+
+                if (!(_ret === 'continue')) {
+                  _context3.next = 8;
                   break;
                 }
 
-                console.error('Contract creation not supported');
-                return _context3.abrupt('continue', 31);
+                return _context3.abrupt('continue', 8);
 
-              case 9:
-                _context3.next = 11;
-                return this.getContractCode(evmCallStackEntry.address);
-
-              case 11:
-                bytecode = _context3.sent;
-                contractData = this.getContractDataIfExists(this._contractsData.contractsData, bytecode);
-
-                if (contractData) {
-                  _context3.next = 17;
-                  break;
-                }
-
-                errMsg = isContractCreation ? 'Unknown contract creation transaction' : 'Transaction to an unknown address: ' + evmCallStackEntry.address;
-
-                console.warn(errMsg);
-                return _context3.abrupt('continue', 31);
-
-              case 17:
-                bytecodeHex = _ethereumjsUtil2.default.stripHexPrefix(bytecode);
-                sourceMap = isContractCreation ? contractData.sourceMap : contractData.sourceMapRuntime;
-                pcToSourceRange = (0, _sourceMaps.parseSourceMap)(this._contractsData.sourceCodes, sourceMap, bytecodeHex, this._contractsData.sources);
-                sourceRange = void 0;
-                pc = evmCallStackEntry.structLog.pc;
-                // Sometimes there is not a mapping for this pc (e.g. if the revert
-                // actually happens in assembly). In that case, we want to keep
-                // searching backwards by decrementing the pc until we find a
-                // mapped source range.
-
-              case 22:
-                if (sourceRange) {
-                  _context3.next = 30;
-                  break;
-                }
-
-                sourceRange = pcToSourceRange[pc];
-                pc -= 1;
-
-                if (!(pc <= 0)) {
-                  _context3.next = 28;
-                  break;
-                }
-
-                console.warn('could not find matching sourceRange for structLog: ' + evmCallStackEntry.structLog);
-                return _context3.abrupt('continue', 22);
-
-              case 28:
-                _context3.next = 22;
-                break;
-
-              case 30:
-                sourceRanges.push(sourceRange);
-
-              case 31:
+              case 8:
                 index++;
                 _context3.next = 3;
                 break;
 
-              case 34:
+              case 11:
                 if (!(sourceRanges.length > 0)) {
-                  _context3.next = 37;
+                  _context3.next = 14;
                   break;
                 }
 
@@ -488,111 +458,38 @@ var Web3TraceProvider = function () {
                 });
                 return _context3.abrupt('return', '\n\nStack trace for REVERT:\n' + traceArray.reverse().join('\n') + '\n');
 
-              case 37:
+              case 14:
                 return _context3.abrupt('return', '\n\nCould not determine stack trace for REVERT\n');
 
-              case 38:
+              case 15:
               case 'end':
                 return _context3.stop();
             }
           }
-        }, _callee3, this);
+        }, _callee2, this);
       }));
 
-      function getStackTrace(_x11) {
-        return _ref3.apply(this, arguments);
+      function getStackTrace(_x8, _x9) {
+        return _ref2.apply(this, arguments);
       }
 
       return getStackTrace;
     }()
+
+    /**
+     * extract function id from transaction data part.
+     * @param payload
+     * @return {*}
+     */
+
   }, {
-    key: 'collectContractsData',
-    value: function collectContractsData() {
-      var artifactsGlob = 'build/contracts/**/*.json';
-      var artifactFileNames = _glob2.default.sync(artifactsGlob, { absolute: true });
-      var contractsData = [];
-      var sources = [];
-      artifactFileNames.forEach(function (artifactFileName) {
-        var artifact = JSON.parse(_fs2.default.readFileSync(artifactFileName).toString());
-
-        var correctPath = process.env.MODULE_RELATIVE_PATH || '';
-        // If the sourcePath starts with zeppelin, then prepend with the pwd and node_modules
-        if (new RegExp('^(open)?zeppelin-solidity').test(artifact.sourcePath)) {
-          artifact.sourcePath = process.env.PWD + '/' + correctPath + 'node_modules/' + artifact.sourcePath;
-        }
-        sources.push({
-          artifactFileName: artifactFileName,
-          id: artifact.ast.id,
-          sourcePath: artifact.sourcePath
-        });
-
-        if (!artifact.bytecode) {
-          console.warn(artifactFileName + ' doesn\'t contain bytecode. Skipping...');
-          return;
-        }
-
-        var contractData = {
-          artifactFileName: artifactFileName,
-          sourceCodes: sourceCodes,
-          sources: sources,
-          bytecode: artifact.bytecode,
-          sourceMap: artifact.sourceMap,
-          runtimeBytecode: artifact.deployedBytecode,
-          sourceMapRuntime: artifact.deployedSourceMap
-        };
-        contractsData.push(contractData);
-      });
-      sources = sources.sort(function (a, b) {
-        return parseInt(a.id, 10) - parseInt(b.id, 10);
-      });
-      var sourceCodes = sources.map(function (source) {
-        return _fs2.default.readFileSync(source.sourcePath).toString();
-      });
-      return {
-        contractsData: contractsData,
-        sourceCodes: sourceCodes,
-        sources: sources.map(function (s) {
-          return s.sourcePath;
-        })
-      };
-    }
-  }, {
-    key: 'getContractDataIfExists',
-    value: function getContractDataIfExists(contractsData, bytecode) {
-      var _this4 = this;
-
-      if (!bytecode.startsWith('0x')) {
-        throw new Error('0x hex prefix missing: ' + bytecode);
+    key: 'getFunctionId',
+    value: function getFunctionId(payload) {
+      var funcId = payload.params[0].data;
+      if (funcId && funcId.length > 10) {
+        funcId = funcId.slice(0, 10);
       }
-
-      var contractData = contractsData.find(function (contractDataCandidate) {
-        var bytecodeRegex = _this4.bytecodeToBytecodeRegex(contractDataCandidate.bytecode);
-        var runtimeBytecodeRegex = _this4.bytecodeToBytecodeRegex(contractDataCandidate.runtimeBytecode);
-        if (contractDataCandidate.bytecode.length === 2 || contractDataCandidate.runtimeBytecode.length === 2) {
-          return false;
-        }
-
-        // We use that function to find by bytecode or runtimeBytecode. Those are quasi-random strings so
-        // collisions are practically impossible and it allows us to reuse that code
-        return bytecode === contractDataCandidate.bytecode || bytecode === contractDataCandidate.runtimeBytecode || new RegExp('' + bytecodeRegex, 'g').test(bytecode) || new RegExp('' + runtimeBytecodeRegex, 'g').test(bytecode);
-      });
-
-      return contractData;
-    }
-  }, {
-    key: 'bytecodeToBytecodeRegex',
-    value: function bytecodeToBytecodeRegex(bytecode) {
-      var bytecodeRegex = bytecode
-      // Library linking placeholder: __ConvertLib____________________________
-      .replace(/_.*_/, '.*')
-      // Last 86 characters is solidity compiler metadata that's different between compilations
-      .replace(/.{86}$/, '')
-      // Libraries contain their own address at the beginning of the code and it's impossible to know it in advance
-      .replace(/^0x730000000000000000000000000000000000000000/, '0x73........................................');
-      // HACK: Node regexes can't be longer that 32767 characters. Contracts bytecode can. We just truncate the regexes. It's safe in practice.
-      var MAX_REGEX_LENGTH = 32767;
-      var truncatedBytecodeRegex = bytecodeRegex.slice(0, MAX_REGEX_LENGTH);
-      return truncatedBytecodeRegex;
+      return funcId;
     }
   }]);
   return Web3TraceProvider;
